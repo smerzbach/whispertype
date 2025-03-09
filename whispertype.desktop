@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=WhisperType
+Comment=Voice-to-text using Whisper.cpp
+Exec=./start-whispertype.sh
+Icon=audio-input-microphone
+Terminal=true
+Categories=Utility;Audio;
+Keywords=voice;speech;transcription;whisper;type; 
