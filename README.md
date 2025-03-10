@@ -1,6 +1,6 @@
 # WhisperType - Voice-to-Text System Tray Tool
 
-A real-time speech-to-text transcription tool using whisper.cpp server. It lives in your system tray, ready to transcribe your voice with a global hotkey. Designed for XFCE desktop environment, WhisperType provides a seamless way to convert speech to text anywhere in your system.
+A real-time speech-to-text transcription tool using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) server. It lives in your system tray, ready to transcribe your voice with a global hotkey. Designed for XFCE desktop environment, WhisperType provides a seamless way to convert speech to text anywhere in your system.
 
 ## Features
 
