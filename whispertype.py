@@ -9,18 +9,19 @@ import threading
 import subprocess
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 import requests
 import pyperclip
 import sys
-import gi
-import socket
 import configparser
 import shutil
-gi.require_version('Gtk', '3.0')
-gi.require_version('AppIndicator3', '0.1')
-from gi.repository import Gtk, AppIndicator3, GLib
+from PIL import Image
+import pystray
+import pyautogui
 from pynput import keyboard
+import platform
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
 
 def load_config():
     """Load configuration from config.ini file"""
@@ -54,83 +55,50 @@ SHOW_AUDIO_METER = CONFIG.getboolean('Defaults', 'show_audio_meter', fallback=Fa
 AUTO_COPY = CONFIG.getboolean('Defaults', 'auto_copy', fallback=False)
 AUTO_TYPE = CONFIG.getboolean('Defaults', 'auto_type', fallback=False)
 
-class SettingsDialog(Gtk.Dialog):
-    def __init__(self, parent, models_dir, current_settings):
-        super().__init__(title="Server Settings", parent=None, flags=0)
-        self.set_modal(True)
-        self.set_default_size(300, 150)
+class WhisperTypeConfig:
+    def __init__(self):
+        self.config = CONFIG
         
-        box = self.get_content_area()
-        grid = Gtk.Grid()
-        grid.set_column_spacing(12)
-        grid.set_row_spacing(6)
-        grid.set_margin_start(12)
-        grid.set_margin_end(12)
-        grid.set_margin_top(12)
-        grid.set_margin_bottom(12)
+    def get(self, section, key, fallback=None):
+        return self.config.get(section, key, fallback=fallback)
         
-        # Model selection
-        model_label = Gtk.Label(label="Model:")
-        grid.attach(model_label, 0, 0, 1, 1)
+    def getboolean(self, section, key, fallback=False):
+        return self.config.getboolean(section, key, fallback=fallback)
         
-        self.model_combo = Gtk.ComboBoxText()
-        if os.path.exists(models_dir):
-            models = [f for f in os.listdir(models_dir) if f.endswith('.bin')]
-            for model in sorted(models):
-                self.model_combo.append_text(model)
-                if os.path.join(models_dir, model) == current_settings['model_path']:
-                    self.model_combo.set_active_id(model)
-        grid.attach(self.model_combo, 1, 0, 1, 1)
+    def getint(self, section, key, fallback=0):
+        return self.config.getint(section, key, fallback=fallback)
         
-        # Language selection
-        lang_label = Gtk.Label(label="Language:")
-        grid.attach(lang_label, 0, 1, 1, 1)
-        
-        self.lang_entry = Gtk.Entry()
-        self.lang_entry.set_text(current_settings['language'])
-        self.lang_entry.set_width_chars(5)
-        grid.attach(self.lang_entry, 1, 1, 1, 1)
-        
-        # Port selection
-        port_label = Gtk.Label(label="Port:")
-        grid.attach(port_label, 0, 2, 1, 1)
-        
-        self.port_entry = Gtk.Entry()
-        self.port_entry.set_text(current_settings['port'])
-        self.port_entry.set_width_chars(5)
-        grid.attach(self.port_entry, 1, 2, 1, 1)
-        
-        # Translation checkbox
-        self.translate_check = Gtk.CheckButton(label="Enable translation to English")
-        self.translate_check.set_active(current_settings.get('translate', False))
-        grid.attach(self.translate_check, 0, 3, 2, 1)
-        
-        box.add(grid)
-        
-        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        self.add_button("OK", Gtk.ResponseType.OK)
-        
-        self.show_all()
+    def getfloat(self, section, key, fallback=0.0):
+        return self.config.getfloat(section, key, fallback=fallback)
 
-    def get_settings(self):
-        return {
-            'model': self.model_combo.get_active_text(),
-            'language': self.lang_entry.get_text().strip(),
-            'port': self.port_entry.get_text().strip(),
-            'translate': self.translate_check.get_active()
-        }
-
-class WhisperTypeIndicator:
-    def __init__(self, client):
-        self.client = client
-        self.indicator = AppIndicator3.Indicator.new(
-            "whispertype",
-            "audio-input-microphone",
-            AppIndicator3.IndicatorCategory.APPLICATION_STATUS
-        )
-        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+class WhisperType:
+    def __init__(self):
+        print("[INIT] Starting WhisperType initialization...")
+        self.config = WhisperTypeConfig()
+        self.verbose = self.config.getboolean('Defaults', 'verbose', fallback=False)
+        self.recording = False
+        self.menu_recording = False  # Add this flag to track menu-triggered recording
+        self.audio_data = []
+        self.sample_rate = self.config.getint('Recording', 'sample_rate', 16000)
+        self.temp_dir = tempfile.gettempdir()
+        self.log(f"[INIT] Using temp directory: {self.temp_dir}")
         
-        # Server settings from config
+        # Server state
+        self.server_running = False
+        self.server_process = None
+        
+        # Configure pyautogui
+        self.log("[INIT] Configuring pyautogui settings...")
+        pyautogui.FAILSAFE = False
+        if platform.system().lower() == 'linux':
+            self.log("[INIT] Linux detected, setting up X11 keyboard mapping")
+            pyautogui.KEYBOARD_MAPPING = {
+                'enter': 'Return',
+                'tab': 'Tab',
+                'space': 'space'
+            }
+        
+        # Load configuration
         self.models_dir = os.environ.get('WHISPER_MODELS_DIR')
         if not self.models_dir:
             print("Error: WHISPER_MODELS_DIR environment variable must be set")
@@ -142,394 +110,472 @@ class WhisperTypeIndicator:
         self.port = CONFIG.get('Server', 'port', fallback='7777')
         self.translate = CONFIG.getboolean('Defaults', 'translate', fallback=False)
         
-        self.setup_menu()
-        self.update_status()
-
-    def setup_menu(self):
-        menu = Gtk.Menu()
-
-        # Status items (not clickable)
-        self.status_item = Gtk.MenuItem(label="Status: Ready")
-        self.status_item.set_sensitive(False)
-        menu.append(self.status_item)
-
-        # Server status (not clickable)
-        self.server_label = Gtk.MenuItem(label="Server: Checking...")
-        self.server_label.set_sensitive(False)
-        menu.append(self.server_label)
-
-        # Keyboard shortcuts info (not clickable)
-        shortcuts_item = Gtk.MenuItem(label="Keyboard Shortcuts:")
-        shortcuts_item.set_sensitive(False)
-        menu.append(shortcuts_item)
+        # Enable AutoType by default
+        global AUTO_TYPE
+        AUTO_TYPE = True
         
-        record_shortcut = Gtk.MenuItem(label="   Ctrl+Shift+Z: Record")
-        record_shortcut.set_sensitive(False)
-        menu.append(record_shortcut)
+        # Initialize server URL
+        self.server_url = f"http://localhost:{self.port}/inference"
         
-        type_toggle_shortcut = Gtk.MenuItem(label="   Ctrl+Shift+T: Toggle Auto-Type")
-        type_toggle_shortcut.set_sensitive(False)
-        menu.append(type_toggle_shortcut)
+        # Initialize recording state
+        self.is_recording = False
+        self.audio_data = []
+        self.stream = None
+        self.progress_thread = None
+        self.stop_progress = False
         
-        quit_shortcut = Gtk.MenuItem(label="   Ctrl+Shift+X: Quit")
-        quit_shortcut.set_sensitive(False)
-        menu.append(quit_shortcut)
-
-        # Separator
-        menu.append(Gtk.SeparatorMenuItem())
-
-        # Server settings
-        settings_item = Gtk.MenuItem(label="Server Settings...")
-        settings_item.connect("activate", self.show_settings_dialog)
-        menu.append(settings_item)
-
-        # Server control buttons
-        self.start_server_button = Gtk.MenuItem(label="Start Server")
-        self.start_server_button.connect("activate", self.start_server)
-        self.start_server_button.set_sensitive(False)  # Initially disabled
-        menu.append(self.start_server_button)
-
-        self.stop_server_button = Gtk.MenuItem(label="Stop Server")
-        self.stop_server_button.connect("activate", self.stop_server)
-        self.stop_server_button.set_sensitive(False)  # Initially disabled
-        menu.append(self.stop_server_button)
-
-        # Separator
-        menu.append(Gtk.SeparatorMenuItem())
-
-        # Toggle audio meter
-        self.meter_item = Gtk.CheckMenuItem(label="Show Audio Meter")
-        self.meter_item.set_active(SHOW_AUDIO_METER)
-        self.meter_item.connect("activate", self.toggle_audio_meter)
-        menu.append(self.meter_item)
-
-        # Toggle auto-copy
-        self.copy_item = Gtk.CheckMenuItem(label="Auto-Copy to Clipboard")
-        self.copy_item.set_active(AUTO_COPY)
-        self.copy_item.connect("activate", self.toggle_auto_copy)
-        menu.append(self.copy_item)
-
-        # Toggle auto-type
-        self.type_item = Gtk.CheckMenuItem(label="Auto-Type Text (Ctrl+Shift+T)")
-        self.type_item.set_active(AUTO_TYPE)
-        self.type_item.connect("activate", self.toggle_auto_type)
-        menu.append(self.type_item)
-
-        # Separator
-        menu.append(Gtk.SeparatorMenuItem())
-
-        # Quit item
-        quit_item = Gtk.MenuItem(label="Quit (Ctrl+Shift+X)")
-        quit_item.connect("activate", self.quit)
-        menu.append(quit_item)
-
-        menu.show_all()
-        self.indicator.set_menu(menu)
-
-    def show_settings_dialog(self, widget):
-        """Show the settings dialog"""
-        current_settings = {
-            'model_path': self.model_path,
-            'language': self.language,
-            'port': self.port,
-            'translate': self.translate
-        }
-        dialog = SettingsDialog(None, self.models_dir, current_settings)
-        response = dialog.run()
+        # Platform-specific setup
+        self.log("[INIT] Setting up platform-specific configurations...")
+        self.setup_platform()
         
-        if response == Gtk.ResponseType.OK:
-            settings = dialog.get_settings()
-            if settings['model']:
-                self.model_path = os.path.join(self.models_dir, settings['model'])
-            if settings['language']:
-                self.language = settings['language']
-            if settings['port']:
-                self.port = settings['port']
-                self.client.server_url = f"http://localhost:{self.port}/inference"
-            self.translate = settings['translate']
+        # Create tray icon
+        self.log("[INIT] Creating system tray icon...")
+        self.create_tray_icon()
         
-        dialog.destroy()
+        # Start keyboard listener
+        self.log("[INIT] Setting up keyboard listeners...")
+        self.setup_keyboard_listener()
+        
+        # Auto-start server
+        self.log("[INIT] Auto-starting server...")
+        self.start_server()
+        
+        self.log("[INIT] WhisperType initialization complete!")
 
-    def update_status(self):
-        if self.client.recording:
-            self.status_item.set_label("Status: Recording...")
-            self.indicator.set_icon("microphone-sensitivity-high")  # Green mic icon
-        else:
-            self.status_item.set_label("Status: Ready")
-            # Update icon based on server status and auto-type
-            self.update_icon()
-        return True
+    def log(self, message):
+        """Log a message to console if verbose is enabled."""
+        if self.verbose:
+            print(message)
 
-    def update_icon(self):
-        """Update the indicator icon based on server status and auto-type"""
-        try:
-            # Check server status
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(('localhost', int(self.port)))
-            sock.close()
+    def setup_keyboard_listener(self):
+        """Setup keyboard event handling"""
+        def on_press(key):
+            try:
+                self.log(f"[KEYBOARD] Key pressed: {key}")
+                if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                    self.log("[KEYBOARD] Ctrl key pressed")
+                    self.ctrl_pressed = True
+                elif key == keyboard.Key.shift_l or key == keyboard.Key.shift_r:
+                    self.log("[KEYBOARD] Shift key pressed")
+                    self.shift_pressed = True
+                elif hasattr(key, 'char'):
+                    if key.char and key.char.upper() == 'Z' and self.ctrl_pressed and self.shift_pressed:
+                        self.log("[KEYBOARD] Ctrl+Shift+Z detected, toggling recording")
+                        self.start_recording()
+                    elif key.char and key.char.upper() == 'X' and self.ctrl_pressed and self.shift_pressed:
+                        self.log("[KEYBOARD] Ctrl+Shift+X detected, quitting application")
+                        self.quit()
+                    elif key.char and key.char.upper() == 'T' and self.ctrl_pressed and self.shift_pressed:
+                        self.log("[KEYBOARD] Ctrl+Shift+T detected, toggling auto-type")
+                        self.toggle_auto_type()
+            except AttributeError as e:
+                self.log(f"[KEYBOARD] AttributeError in on_press: {e}")
+
+        def on_release(key):
+            try:
+                self.log(f"[KEYBOARD] Key released: {key}")
+                if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                    self.log("[KEYBOARD] Ctrl key released")
+                    self.ctrl_pressed = False
+                elif key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
+                    self.log("[KEYBOARD] Shift key released")
+                    self.shift_pressed = False
+                
+                # Stop recording if either Ctrl or Shift is released
+                if (key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.shift_l, keyboard.Key.shift_r) 
+                    and not (self.ctrl_pressed and self.shift_pressed)
+                    and not self.menu_recording):  # Only stop if not menu-triggered recording
+                    if self.recording:
+                        print("[KEYBOARD] Hotkey released, stopping recording")
+                        self.stop_recording()
+            except AttributeError as e:
+                self.log(f"[KEYBOARD] AttributeError in on_release: {e}")
+
+        self.listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.listener.start()
+        self.log("[KEYBOARD] Keyboard listener started successfully")
+
+    def setup_platform(self):
+        """Setup platform-specific configurations"""
+        self.platform = platform.system().lower()
+        self.log(f"[PLATFORM] Detected platform: {self.platform}")
+        if self.platform == 'windows':
+            self.icon_path = 'icons/mic-windows.ico'
+            self.recording_icon_path = 'icons/mic-recording-windows.ico'
+        elif self.platform == 'darwin':  # macOS
+            self.icon_path = 'icons/mic-macos.png'
+            self.recording_icon_path = 'icons/mic-recording-macos.png'
+        else:  # Linux
+            self.icon_path = 'icons/mic-linux.png'
+            self.recording_icon_path = 'icons/mic-recording-linux.png'
+        self.log(f"[PLATFORM] Using icon path: {self.icon_path}")
+        self.log(f"[PLATFORM] Using recording icon path: {self.recording_icon_path}")
+
+    def create_tray_icon(self):
+        """Create the system tray icon and menu"""
+        self.log("[TRAY] Starting tray icon creation...")
+        image = Image.open(self.icon_path) if os.path.exists(self.icon_path) else self.create_default_icon()
+        self.log(f"[TRAY] Icon loaded: {self.icon_path if os.path.exists(self.icon_path) else 'default icon'}")
+        
+        def create_menu():
+            self.log("[TRAY] Creating menu structure...")
             
-            if result == 0:  # Server is running
-                if AUTO_TYPE:
-                    self.indicator.set_icon("input-keyboard")  # Keyboard icon when auto-type is on
-                else:
-                    self.indicator.set_icon("audio-input-microphone")  # Normal mic icon
-            else:
-                self.indicator.set_icon("audio-input-microphone-muted")  # Muted icon when server is down
-        except Exception:
-            self.indicator.set_icon("audio-input-microphone-muted")
-
-    def check_server(self):
-        try:
-            # Try to connect to the server socket instead of making a GET request
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(('localhost', int(self.port)))
-            sock.close()
+            # Create model submenu
+            models = []
+            if os.path.exists(self.models_dir):
+                models = sorted([f for f in os.listdir(self.models_dir) if f.endswith('.bin')])
             
-            if result == 0:  # Port is open
-                self.server_label.set_label("Server: Ready")
-                self.start_server_button.set_sensitive(False)  # Disable start button when server is running
-                self.stop_server_button.set_sensitive(True)   # Enable stop button when server is running
-                self.update_icon()  # Update icon based on auto-type status
-            else:
-                self.server_label.set_label("Server: Not Available")
-                self.start_server_button.set_sensitive(True)  # Enable start button when server is not running
-                self.stop_server_button.set_sensitive(False)  # Disable stop button when server is not running
-                self.indicator.set_icon("audio-input-microphone-muted")
-        except Exception:
-            self.server_label.set_label("Server: Not Available")
-            self.start_server_button.set_sensitive(True)  # Enable start button when server is not running
-            self.stop_server_button.set_sensitive(False)  # Disable stop button when server is not running
-            self.indicator.set_icon("audio-input-microphone-muted")
-        return True
+            def create_model_item(model_name):
+                return pystray.MenuItem(
+                    model_name,
+                    lambda item: self.change_model(model_name),
+                    checked=lambda item: os.path.basename(self.model_path) == model_name,
+                    radio=True
+                )
 
-    def start_server(self, widget):
-        """Start the whisper server with current settings"""
-        try:
-            # Use current stored settings
-            if not os.path.exists(self.model_path):
-                print("Model file not found:", self.model_path)
-                return
-            
-            # Get server command from config and format it with current settings
-            cmd_template = CONFIG.get('Server Command', 'command', 
-                                    fallback='whisper-server -m {model_path} -l {language} --port {port}')
-            cmd = cmd_template.format(
-                model_path=self.model_path,
-                language=self.language,
-                port=self.port
+            # Create language submenu
+            common_languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'zh', 'ja', 'ko']
+            def create_language_item(lang_code):
+                return pystray.MenuItem(
+                    lang_code,
+                    lambda item: self.change_language(lang_code),
+                    checked=lambda item: self.language == lang_code,
+                    radio=True
+                )
+
+            # Create port submenu
+            common_ports = ['7777', '7778', '7779', '7780']
+            def create_port_item(port):
+                return pystray.MenuItem(
+                    port,
+                    lambda item: self.change_port(port),
+                    checked=lambda item: self.port == port,
+                    radio=True
+                )
+
+            # Create settings submenu
+            settings_menu = pystray.Menu(
+                pystray.MenuItem("Model", pystray.Menu(*[create_model_item(model) for model in models])),
+                pystray.MenuItem("Language", pystray.Menu(*(
+                    create_language_item(lang) for lang in common_languages
+                ))),
+                pystray.MenuItem("Port", pystray.Menu(*(
+                    create_port_item(port) for port in common_ports
+                ))),
+                pystray.MenuItem("Translation", lambda item: self.toggle_translation(), checked=lambda item: self.translate),
+                pystray.MenuItem("Show Audio Meter", lambda item: self.toggle_audio_meter(), checked=lambda item: SHOW_AUDIO_METER),
             )
             
-            # Add translation flag if enabled
-            if self.translate:
+            menu = (
+                pystray.MenuItem("Auto-Type Text (Ctrl+Shift+T)", lambda item: self.toggle_auto_type(), checked=lambda item: AUTO_TYPE),
+                pystray.MenuItem("Auto-Copy to Clipboard", lambda item: self.toggle_auto_copy(), checked=lambda item: AUTO_COPY),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Record (Ctrl+Shift+Z)", lambda item: self.toggle_recording(), checked=lambda item: self.recording),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Start Server", lambda item: self.start_server(), enabled=lambda item: not self.server_running),
+                pystray.MenuItem("Stop Server", lambda item: self.stop_server(), enabled=lambda item: self.server_running),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Settings", settings_menu),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit (Ctrl+Shift+X)", lambda item: self.quit())
+            )
+            self.log("[TRAY] Menu structure created successfully")
+            return menu
+        
+        self.log("[TRAY] Initializing system tray icon...")
+        self.tray_icon = pystray.Icon(
+            name="whispertype",
+            icon=image,
+            title="WhisperType - Server Stopped",  # Initial title
+            menu=create_menu()
+        )
+        
+        # Update title with server status
+        self.update_tray_status()
+        
+        # Check if menu is supported
+        self.log("[TRAY] Checking menu support...")
+        if hasattr(self.tray_icon, 'HAS_MENU'):
+            has_menu = self.tray_icon.HAS_MENU
+            self.log(f"[TRAY] Menu support: {'Yes' if has_menu else 'No'}")
+            if not has_menu:
+                self.log("[TRAY] WARNING: Menu support is not available. You may need to install system GTK packages.")
+                self.log("[TRAY] Try: sudo apt-get install python3-gi python3-gi-cairo gir1.2-gtk-3.0")
+        
+        self.log(f"[TRAY] Tray icon backend: {type(self.tray_icon).__module__}.{type(self.tray_icon).__name__}")
+        self.log("[TRAY] Tray icon initialized")
+
+    def update_tray_status(self):
+        """Update tray icon title with current status"""
+        status = "Running" if self.server_running else "Stopped"
+        model_name = os.path.basename(self.model_path)
+        title = f"WhisperType - Server {status}\nModel: {model_name}\nLanguage: {self.language}"
+        self.tray_icon.title = title
+
+    def change_language(self, lang_code):
+        """Change the language setting"""
+        self.log(f"[SETTINGS] Changing language to: {lang_code}")
+        restart_server = False
+        
+        if self.server_running:
+            self.log("[SETTINGS] Server is running, will restart after language change")
+            restart_server = True
+            
+        # Update language
+        self.language = lang_code
+        
+        # Save to config
+        self.config.config.set('Defaults', 'language', lang_code)
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+        with open(config_path, 'w') as f:
+            self.config.config.write(f)
+            
+        self.log("[SETTINGS] Language changed and config saved")
+        
+        # Update tray status
+        self.update_tray_status()
+        
+        # Restart server if it was running
+        if restart_server:
+            self.log("[SETTINGS] Restarting server with new language...")
+            self.stop_server()
+            self.start_server()
+
+    def change_port(self, port):
+        """Change the server port"""
+        self.log(f"[SETTINGS] Changing port to: {port}")
+        restart_server = False
+        
+        if self.server_running:
+            self.log("[SETTINGS] Server is running, will restart after port change")
+            restart_server = True
+            
+        # Update port
+        self.port = port
+        self.server_url = f"http://localhost:{self.port}/inference"
+        
+        # Save to config
+        self.config.config.set('Server', 'port', port)
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+        with open(config_path, 'w') as f:
+            self.config.config.write(f)
+            
+        self.log("[SETTINGS] Port changed and config saved")
+        
+        # Restart server if it was running
+        if restart_server:
+            self.log("[SETTINGS] Restarting server with new port...")
+            self.stop_server()
+            self.start_server()
+
+    def toggle_translation(self):
+        """Toggle translation setting"""
+        self.log("[SETTINGS] Toggling translation...")
+        restart_server = False
+        
+        if self.server_running:
+            self.log("[SETTINGS] Server is running, will restart after translation change")
+            restart_server = True
+            
+        # Update translation setting
+        self.translate = not self.translate
+        
+        # Save to config
+        self.config.config.set('Defaults', 'translate', str(self.translate))
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+        with open(config_path, 'w') as f:
+            self.config.config.write(f)
+            
+        self.log("[SETTINGS] Translation setting changed and config saved")
+        
+        # Restart server if it was running
+        if restart_server:
+            self.log("[SETTINGS] Restarting server with new translation setting...")
+            self.stop_server()
+            self.start_server()
+
+    def change_model(self, model_name):
+        """Change the Whisper model"""
+        self.log(f"[MODEL] Changing model to: {model_name}")
+        restart_server = False
+        
+        if self.server_running:
+            self.log("[MODEL] Server is running, will restart after model change")
+            restart_server = True
+            
+        # Update model path
+        self.model_path = os.path.join(self.models_dir, model_name)
+        
+        # Save to config
+        self.config.config.set('Models', 'default_model', model_name)
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+        with open(config_path, 'w') as f:
+            self.config.config.write(f)
+            
+        self.log("[MODEL] Model changed and config saved")
+        
+        # Restart server if it was running
+        if restart_server:
+            self.log("[MODEL] Restarting server with new model...")
+            self.stop_server()
+            self.start_server()
+
+    def start_server(self):
+        """Start the whisper server"""
+        if self.server_running:
+            self.log("[SERVER] Server is already running")
+            return
+            
+        try:
+            # Get models directory from environment or config
+            models_dir = os.getenv('WHISPER_MODELS_DIR')
+            if not models_dir:
+                self.log("[SERVER] Error: WHISPER_MODELS_DIR environment variable not set")
+                return
+                
+            model_path = os.path.join(
+                models_dir,
+                self.config.get('Models', 'default_model')
+            )
+            
+            if not os.path.exists(model_path):
+                self.log("[SERVER] Model file not found:", model_path)
+                return
+            
+            cmd_template = self.config.get('Server Command', 'command')
+            cmd = cmd_template.format(
+                model_path=model_path,
+                language=self.config.get('Defaults', 'language', 'en'),
+                port=self.config.get('Server', 'port', '7777')
+            )
+            
+            if self.config.getboolean('Defaults', 'translate', False):
                 cmd += ' -tr'
             
-            # Split command into list for Popen
-            cmd = cmd.split()
+            self.log(f"[SERVER] Starting server with command: {cmd}")
+            self.server_process = subprocess.Popen(cmd.split())
+            self.server_running = True
+            self.log("[SERVER] Server starting...")
             
-            self.server_process = subprocess.Popen(cmd, 
-                                                 stdout=subprocess.PIPE, 
-                                                 stderr=subprocess.PIPE)
-            self.server_label.set_label("Server: Starting...")
-            self.start_server_button.set_sensitive(False)  # Disable start button while starting
-            self.stop_server_button.set_sensitive(True)   # Enable stop button while starting
-            # Force an immediate server check after a short delay
-            GLib.timeout_add(2000, self.check_server)
+            # Update menu items and tray status
+            self.tray_icon.update_menu()
+            self.update_tray_status()
+            
         except Exception as e:
-            print(f"Error starting server: {e}")
-            self.server_label.set_label("Server: Start Failed")
-            self.start_server_button.set_sensitive(True)  # Re-enable start button if start fails
-            self.stop_server_button.set_sensitive(False)  # Disable stop button if start fails
+            self.log(f"[SERVER] Error starting server: {e}")
+            self.server_running = False
+            self.server_process = None
 
-    def stop_server(self, widget):
+    def stop_server(self):
         """Stop the whisper server"""
-        try:
-            # Find whisper-server process
-            result = subprocess.run(['pkill', '-f', 'whisper-server'], 
-                                 stdout=subprocess.PIPE, 
-                                 stderr=subprocess.PIPE)
-            if result.returncode == 0:
-                self.server_label.set_label("Server: Stopping...")
-                # Force an immediate server check after a short delay
-                GLib.timeout_add(2000, self.check_server)
-            else:
-                print("No whisper-server process found")
-                self.server_label.set_label("Server: Not Available")
-                self.start_server_button.set_sensitive(True)
-                self.stop_server_button.set_sensitive(False)
-                self.indicator.set_icon("audio-input-microphone-muted")
-        except Exception as e:
-            print(f"Error stopping server: {e}")
-            self.server_label.set_label("Server: Stop Failed")
-
-    def toggle_audio_meter(self, widget):
-        global SHOW_AUDIO_METER
-        SHOW_AUDIO_METER = widget.get_active()
-
-    def toggle_auto_copy(self, widget):
-        global AUTO_COPY
-        AUTO_COPY = widget.get_active()
-
-    def toggle_auto_type(self, widget):
-        global AUTO_TYPE
-        AUTO_TYPE = widget.get_active()
-        self.update_icon()  # Update icon when auto-type is toggled
-
-    def quit(self, widget):
-        self.client.running = False
-        if self.client.recording:
-            self.client.stop_recording()
-        Gtk.main_quit()
-
-class WhisperType:
-    def __init__(self):
-        self.recording = False
-        self.audio_data = []
-        self.sample_rate = int(CONFIG.get('Recording', 'sample_rate', fallback='16000'))
-        self.temp_dir = tempfile.gettempdir()
-        
-        # Server settings from config
-        host = CONFIG.get('Server', 'host', fallback='localhost')
-        port = CONFIG.get('Server', 'port', fallback='7777')
-        self.server_url = f"http://{host}:{port}/inference"
-        
-        self.recording_start_time = None
-        self.last_audio_level = 0
-        self.ctrl_pressed = False
-        self.shift_pressed = False
-        self.running = True
-        
-        # Setup keyboard listeners
-        self.listener = keyboard.Listener(
-            on_press=self.on_press,
-            on_release=self.on_release)
-        self.listener.start()
-
-        # Check server availability
-        try:
-            requests.get(self.server_url, timeout=1)
-        except Exception as e:
-            print(f"Warning: Error checking server: {e}")
-
-    def on_press(self, key):
-        """Handle key press events"""
-        try:
-            if key == keyboard.Key.ctrl:
-                self.ctrl_pressed = True
-            elif key == keyboard.Key.shift:
-                self.shift_pressed = True
-            elif hasattr(key, 'char'):
-                if key.char == 'Z' and self.ctrl_pressed and self.shift_pressed:
-                    self.start_recording()
-                elif key.char == 'X' and self.ctrl_pressed and self.shift_pressed:
-                    print("\nQuitting...")
-                    self.running = False
-                    Gtk.main_quit()
-                    if self.recording:
-                        self.stop_recording()
-                elif key.char == 'T' and self.ctrl_pressed and self.shift_pressed:
-                    global AUTO_TYPE
-                    AUTO_TYPE = not AUTO_TYPE
-                    self.type_item.set_active(AUTO_TYPE)
-                    print(f"\nAuto-Type {'enabled' if AUTO_TYPE else 'disabled'}")
-        except AttributeError:
-            pass
-
-    def on_release(self, key):
-        """Handle key release events"""
-        try:
-            if key == keyboard.Key.ctrl:
-                self.ctrl_pressed = False
-                if self.recording:
-                    self.stop_recording()
-            elif key == keyboard.Key.shift:
-                self.shift_pressed = False
-                if self.recording:
-                    self.stop_recording()
-            elif hasattr(key, 'char') and key.char == 'R' and self.recording:
-                self.stop_recording()
-        except AttributeError:
-            pass
-
-    def show_audio_level(self, level):
-        """Display audio level meter"""
-        if not self.recording or not SHOW_AUDIO_METER:  # Don't show meter if we're not recording or it's disabled
+        if not self.server_running:
+            self.log("[SERVER] Server is not running")
             return
-        bars = min(int(level * 20), 20)  # Scale to 20 characters and cap it
-        meter = '▁' * bars + ' ' * (20 - bars)
-        sys.stdout.write('\rRecording [' + meter + ']')
-        sys.stdout.flush()
+            
+        try:
+            self.log("[SERVER] Stopping server...")
+            if self.platform == 'windows':
+                subprocess.run(['taskkill', '/F', '/IM', 'whisper-server.exe'])
+            else:
+                subprocess.run(['pkill', '-f', 'whisper-server'])
+            
+            if self.server_process:
+                self.server_process.terminate()
+                self.server_process = None
+                
+            self.server_running = False
+            self.log("[SERVER] Server stopped")
+            
+            # Update menu items and tray status
+            self.tray_icon.update_menu()
+            self.update_tray_status()
+            
+        except Exception as e:
+            self.log(f"[SERVER] Error stopping server: {e}")
+
+    def toggle_audio_meter(self):
+        """Toggle audio meter display"""
+        global SHOW_AUDIO_METER
+        SHOW_AUDIO_METER = not SHOW_AUDIO_METER
+
+    def toggle_auto_copy(self):
+        """Toggle auto-copy to clipboard"""
+        global AUTO_COPY
+        AUTO_COPY = not AUTO_COPY
+
+    def toggle_auto_type(self):
+        """Toggle auto-type functionality"""
+        global AUTO_TYPE
+        self.log("[AUTO-TYPE] Toggling auto-type...")
+        AUTO_TYPE = not AUTO_TYPE
+        self.log(f"[AUTO-TYPE] Auto-Type is now {'enabled' if AUTO_TYPE else 'disabled'}")
+        # Update menu item state if menu is available
+        if hasattr(self.tray_icon, 'menu'):
+            self.log("[AUTO-TYPE] Updating menu item state...")
+            for item in self.tray_icon.menu:
+                if isinstance(item, pystray.MenuItem) and item.text == "Auto-Type Text":
+                    item._checked = AUTO_TYPE
+                    self.log("[AUTO-TYPE] Menu item state updated")
+                    break
+
+    def quit(self):
+        """Quit the application"""
+        self.log("[APP] Shutting down...")
+        self.running = False
+        if self.recording:
+            self.stop_recording()
+        if self.server_running:
+            self.stop_server()
+        self.tray_icon.stop()
+        self.log("[APP] Shutdown complete")
 
     def start_recording(self):
-        """Start recording"""
+        """Start recording audio"""
         if not self.recording:
             self.recording = True
             self.audio_data = []
             self.recording_start_time = time.time()
-            print("\nRecording started... Hold Ctrl+Shift+Z to continue recording.")
+            self.log("\nRecording started... Hold Ctrl+Shift+Z to continue recording.")
             threading.Thread(target=self.record_audio).start()
+            
+            # Update tray icon
+            if os.path.exists(self.recording_icon_path):
+                self.tray_icon.icon = Image.open(self.recording_icon_path)
 
     def stop_recording(self):
-        """Stop recording and process"""
+        """Stop recording and process audio"""
         if self.recording:
             self.recording = False
-            if SHOW_AUDIO_METER:
-                sys.stdout.write('\r' + ' ' * 50 + '\r')  # Clear audio meter line
             recording_duration = time.time() - self.recording_start_time
             
-            if recording_duration < MIN_RECORDING_DURATION:
-                print(f"Recording too short ({recording_duration:.1f}s), discarding...")
+            # Restore normal icon
+            if os.path.exists(self.icon_path):
+                self.tray_icon.icon = Image.open(self.icon_path)
+            
+            if recording_duration < self.config.getfloat('Recording', 'min_duration', 0.1):
+                self.log(f"Recording too short ({recording_duration:.1f}s), discarding...")
                 self.audio_data = []
                 return
                 
-            print("Recording stopped, processing...")
-            
-            # Pad very short recordings with silence
-            if recording_duration < 0.5:  # Add padding for recordings under 0.5s
-                padding_samples = int(0.5 * self.sample_rate) - len(self.audio_data)
-                if padding_samples > 0:
-                    self.audio_data.extend([np.zeros((1,), dtype=np.float32)] * padding_samples)
+            self.log("Recording stopped, processing...")
             
             audio_file = self.save_audio()
             if audio_file:
-                print("Sending to whisper.cpp server...")
-                self.show_progress()
+                self.log("Sending to whisper.cpp server...")
                 transcribed_text = self.transcribe_audio(audio_file)
-                sys.stdout.write('\r' + ' ' * 70 + '\r')  # Clear progress line
                 if transcribed_text:
-                    print(f"Transcribed: {transcribed_text}")
-                    self.type_text(transcribed_text)
+                    self.log(f"Transcribed: {transcribed_text}")
+                    self.handle_transcribed_text(transcribed_text)
                 else:
-                    print("No transcription received")
+                    self.log("No transcription received")
                 os.remove(audio_file)
-
-    def show_progress(self):
-        """Show a progress indicator while waiting for transcription"""
-        def progress_thread():
-            chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-            i = 0
-            while self.transcribing:
-                sys.stdout.write('\r' + chars[i] + ' Transcribing...')
-                sys.stdout.flush()
-                i = (i + 1) % len(chars)
-                time.sleep(0.1)
-            sys.stdout.write('\r' + ' ' * 20 + '\r')
-            sys.stdout.flush()
-
-        self.transcribing = True
-        threading.Thread(target=progress_thread).start()
 
     def record_audio(self):
         """Record audio in a separate thread"""
         def callback(indata, frames, time, status):
             if status:
-                print(status)
+                self.log(status)
             if self.recording:
-                # Calculate audio level (RMS)
-                self.last_audio_level = np.sqrt(np.mean(indata**2))
-                if SHOW_AUDIO_METER:
-                    self.show_audio_level(self.last_audio_level)
                 self.audio_data.extend(indata.copy())
 
         try:
@@ -537,37 +583,27 @@ class WhisperType:
                 while self.recording:
                     sd.sleep(100)
         except Exception as e:
-            print(f"Error recording audio: {e}")
+            self.log(f"Error recording audio: {e}")
             self.recording = False
 
     def save_audio(self):
-        """Save recorded audio to a temporary WAV file"""
-        if not self.audio_data or len(self.audio_data) == 0:
-            print("No audio data recorded")
+        """Save recorded audio to a temporary file"""
+        if not self.audio_data:
             return None
             
         try:
-            audio_array = np.concatenate(self.audio_data, axis=0)
-            if len(audio_array) == 0:
-                print("Empty audio recording")
-                return None
-                
-            # Normalize audio to prevent very quiet recordings
-            max_val = np.max(np.abs(audio_array))
-            if max_val > 0:
-                audio_array = audio_array / max_val * 0.9  # Scale to 90% of maximum
-                
-            temp_file = os.path.join(self.temp_dir, "whisper_recording.wav")
+            audio_data = np.concatenate(self.audio_data)
+            temp_file = os.path.join(self.temp_dir, 'whispertype_recording.wav')
             
             with wave.open(temp_file, 'wb') as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
+                wf.setsampwidth(2)
                 wf.setframerate(self.sample_rate)
-                wf.writeframes((audio_array * 32767).astype(np.int16).tobytes())
+                wf.writeframes((audio_data * 32767).astype(np.int16).tobytes())
             
             return temp_file
         except Exception as e:
-            print(f"Error saving audio: {e}")
+            self.log(f"Error saving audio: {e}")
             return None
 
     def transcribe_audio(self, audio_file):
@@ -575,67 +611,87 @@ class WhisperType:
         try:
             with open(audio_file, 'rb') as f:
                 files = {'file': f}
-                response = requests.post(self.server_url, files=files, timeout=REQUEST_TIMEOUT)
+                response = requests.post(
+                    self.server_url,
+                    files=files,
+                    timeout=10
+                )
                 
             if response.status_code == 200:
                 result = response.json()
-                self.transcribing = False
-                # Clean up the text: replace multiple newlines/spaces with a single space
                 text = result.get('text', '').strip()
-                text = ' '.join(text.split())
-                return text
+                return ' '.join(text.split())
             else:
-                print(f"Error: Server returned status code {response.status_code}")
+                self.log(f"Error: Server returned status code {response.status_code}")
                 if response.text:
-                    print(f"Server response: {response.text[:200]}")
-                self.transcribing = False
+                    self.log(f"Server response: {response.text[:200]}")
                 return None
         except Exception as e:
-            print(f"Error transcribing audio: {e}")
-            self.transcribing = False
+            self.log(f"Error transcribing audio: {e}")
             return None
 
-    def type_text(self, text):
-        """Type text using xdotool"""
+    def handle_transcribed_text(self, text):
+        """Handle transcribed text (copy to clipboard and/or type)"""
+        self.log("[TEXT-HANDLER] Starting to handle transcribed text...")
         if not text:
+            self.log("[TEXT-HANDLER] No text to handle")
             return
             
         try:
             # Copy to clipboard if enabled
             if AUTO_COPY:
+                self.log("[TEXT-HANDLER] Auto-copy enabled, copying to clipboard...")
                 pyperclip.copy(text)
-                print("Text copied to clipboard!")
+                self.log("[TEXT-HANDLER] Text copied to clipboard successfully")
             
             # Type text if enabled
             if AUTO_TYPE:
-                subprocess.run(['xdotool', 'type', text], check=True)
-                print("Text typed successfully!")
-        except subprocess.CalledProcessError as e:
-            print(f"Error using xdotool: {e}")
+                self.log("[TEXT-HANDLER] Auto-Type enabled, preparing to type text...")
+                try:
+                    self.log("[TEXT-HANDLER] Adding delay before typing...")
+                    time.sleep(0.5)
+                    self.log("[TEXT-HANDLER] Starting to type text...")
+                    pyautogui.write(text)
+                    self.log("[TEXT-HANDLER] Text typed successfully")
+                except Exception as e:
+                    self.log(f"[TEXT-HANDLER] Error during typing: {e}")
+            else:
+                self.log("[TEXT-HANDLER] Auto-Type is disabled, skipping typing")
         except Exception as e:
-            print(f"Error handling text: {e}")
+            self.log(f"[TEXT-HANDLER] Error in handle_transcribed_text: {e}")
+
+    def toggle_recording(self):
+        """Toggle recording state (for menu-triggered recording)"""
+        if self.recording:
+            self.menu_recording = False
+            self.stop_recording()
+        else:
+            self.menu_recording = True
+            self.start_recording()
 
 def main():
-    print("WhisperType started. Hold Ctrl+Shift+Z to record.")
-    print("Press Ctrl+Shift+X to quit.")
-    client = WhisperType()
-    
-    # Create system tray icon
-    indicator = WhisperTypeIndicator(client)
-    
-    # Update status every second
-    GLib.timeout_add(1000, indicator.update_status)
-    
-    # Check server status every 5 seconds
-    GLib.timeout_add(5000, indicator.check_server)
+    print("[MAIN] WhisperType starting...")
+    print("[MAIN] Hold Ctrl+Shift+Z to record.")
+    print("[MAIN] Press Ctrl+Shift+X to quit.")
     
     try:
-        # Run the GTK main loop
-        Gtk.main()
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        client.running = False
+        print("[MAIN] Creating WhisperType instance...")
+        client = WhisperType()
+        print("[MAIN] Starting main loop...")
+        client.tray_icon.run()
+        print("[MAIN] Main loop running...")
+    except Exception as e:
+        print(f"[MAIN] Error in main function: {e}")
+        if platform.system().lower() == 'linux':
+            print("[MAIN] On Linux, you may need to install GTK packages:")
+            print("[MAIN] Try: sudo apt-get install python3-gi python3-gi-cairo gir1.2-gtk-3.0")
 
 if __name__ == "__main__":
+    print("[STARTUP] Initializing global settings...")
+    # Initialize global settings
+    SHOW_AUDIO_METER = False
+    AUTO_COPY = False
+    AUTO_TYPE = True  # Set default to True
+    print("[STARTUP] Global settings initialized")
+    
     main() 
