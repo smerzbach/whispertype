@@ -1,6 +1,6 @@
 # WhisperType Cross-Platform
 
-A cross-platform real-time speech-to-text transcription tool using whisper.cpp server. It lives in your system tray, ready to transcribe your voice with a global hotkey.
+A cross-platform real-time speech-to-text transcription tool using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) server. It lives in your system tray, ready to transcribe your voice with a global hotkey.
 
 ## Features
 
@@ -85,16 +85,13 @@ sudo apt install python3-dev python3-setuptools
 ## Platform-Specific Notes
 
 ### Windows
-- Uses native Windows API for keyboard simulation
-- System tray integration uses Win32 API via pystray
+untested
 
 ### macOS
-- Uses AppleScript for keyboard simulation
-- System tray integration uses native macOS menu bar
+untested
 
 ### Linux
-- Uses Xlib/XTest for keyboard simulation
-- System tray integration uses native system tray protocols
+- tested under Ubuntu 24.02 with XFCE
 
 ## Contributing
 
