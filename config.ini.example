@@ -5,7 +5,7 @@ url = http://%(host)s:%(port)s/inference
 
 [Models]
 # Directory containing the whisper.cpp model files (.bin)
-# Must be set via WHISPER_MODELS_DIR environment variable
+models_dir = ${WHISPER_MODELS_DIR}
 default_model = ggml-tiny.en.bin
 
 [Recording]
@@ -20,6 +20,12 @@ auto_copy = false
 auto_type = false
 show_audio_meter = false
 translate = false
+
+[UI]
+# Icon theme - light or dark
+theme = light
+# Notification sound when recording starts/stops
+enable_sounds = true
 
 [Server Command]
 # Command to start the whisper.cpp server
