@@ -2,7 +2,6 @@
 
 import os
 import time
-import json
 import wave
 import tempfile
 import threading
@@ -14,14 +13,11 @@ import pyperclip
 import sys
 import configparser
 import shutil
-from PIL import Image
+from PIL import Image, ImageDraw
 import pystray
 import pyautogui
 from pynput import keyboard
 import platform
-import tkinter as tk
-from tkinter import ttk
-from tkinter import messagebox
 
 def load_config():
     """Load configuration from config.ini file"""
@@ -99,12 +95,18 @@ class WhisperType:
             }
         
         # Load configuration
-        self.models_dir = os.environ.get('WHISPER_MODELS_DIR')
+        self.models_dir = self.config.get('Models', 'models_dir')
         if not self.models_dir:
-            print("Error: WHISPER_MODELS_DIR environment variable must be set")
+            print("Error: models_dir not set in config.ini")
             sys.exit(1)
             
-        default_model = CONFIG.get('Models', 'default_model', fallback='ggml-tiny.en.bin')
+        # Expand any environment variables in the path
+        self.models_dir = os.path.expandvars(self.models_dir)
+        if not os.path.exists(self.models_dir):
+            print(f"Error: Models directory not found: {self.models_dir}")
+            sys.exit(1)
+            
+        default_model = self.config.get('Models', 'default_model', fallback='ggml-tiny.en.bin')
         self.model_path = os.path.join(self.models_dir, default_model)
         self.language = CONFIG.get('Defaults', 'language', fallback='en')
         self.port = CONFIG.get('Server', 'port', fallback='7777')
@@ -199,17 +201,76 @@ class WhisperType:
         """Setup platform-specific configurations"""
         self.platform = platform.system().lower()
         self.log(f"[PLATFORM] Detected platform: {self.platform}")
+        
+        # Get the directory where the script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
         if self.platform == 'windows':
-            self.icon_path = 'icons/mic-windows.ico'
-            self.recording_icon_path = 'icons/mic-recording-windows.ico'
+            self.icon_path = os.path.join(script_dir, 'icons/mic-windows.ico')
+            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-windows.ico')
         elif self.platform == 'darwin':  # macOS
-            self.icon_path = 'icons/mic-macos.png'
-            self.recording_icon_path = 'icons/mic-recording-macos.png'
+            self.icon_path = os.path.join(script_dir, 'icons/mic-macos.png')
+            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-macos.png')
         else:  # Linux
-            self.icon_path = 'icons/mic-linux.png'
-            self.recording_icon_path = 'icons/mic-recording-linux.png'
+            self.icon_path = os.path.join(script_dir, 'icons/mic-linux.png')
+            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-linux.png')
         self.log(f"[PLATFORM] Using icon path: {self.icon_path}")
         self.log(f"[PLATFORM] Using recording icon path: {self.recording_icon_path}")
+
+    def create_default_icon(self):
+        """Create a default icon if the icon file is not found"""
+        self.log("[ICON] Creating default icon...")
+        size = 256
+        color = 'white' if self.platform != 'darwin' else 'black'
+        
+        # Create a new image with transparent background
+        image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        
+        # Calculate dimensions for microphone icon
+        padding = size // 8
+        mic_width = size // 3
+        mic_height = size // 2
+        base_height = size // 6
+        
+        # Draw microphone body
+        mic_left = (size - mic_width) // 2
+        mic_top = padding
+        mic_right = mic_left + mic_width
+        mic_bottom = mic_top + mic_height
+        
+        # Microphone body (rounded rectangle)
+        draw.rounded_rectangle(
+            [mic_left, mic_top, mic_right, mic_bottom],
+            radius=mic_width // 2,
+            fill=color
+        )
+        
+        # Microphone base
+        base_left = size // 4
+        base_right = size - size // 4
+        base_top = mic_bottom - base_height // 2
+        base_bottom = base_top + base_height
+        
+        draw.rounded_rectangle(
+            [base_left, base_top, base_right, base_bottom],
+            radius=base_height // 2,
+            fill=color
+        )
+        
+        # Stand
+        stand_width = size // 8
+        stand_left = (size - stand_width) // 2
+        stand_top = base_top
+        stand_bottom = size - padding
+        
+        draw.rectangle(
+            [stand_left, stand_top, stand_left + stand_width, stand_bottom],
+            fill=color
+        )
+        
+        self.log("[ICON] Default icon created successfully")
+        return image
 
     def create_tray_icon(self):
         """Create the system tray icon and menu"""
@@ -428,28 +489,25 @@ class WhisperType:
             
         try:
             # Get models directory from environment or config
-            models_dir = os.getenv('WHISPER_MODELS_DIR')
+            models_dir = self.models_dir
             if not models_dir:
-                self.log("[SERVER] Error: WHISPER_MODELS_DIR environment variable not set")
+                self.log("[SERVER] Error: models_dir not set in config.ini")
                 return
                 
-            model_path = os.path.join(
-                models_dir,
-                self.config.get('Models', 'default_model')
-            )
+            model_path = self.model_path
             
             if not os.path.exists(model_path):
                 self.log("[SERVER] Model file not found:", model_path)
                 return
             
-            cmd_template = self.config.get('Server Command', 'command')
+            cmd_template = self.config.get('Server', 'command')
             cmd = cmd_template.format(
                 model_path=model_path,
-                language=self.config.get('Defaults', 'language', 'en'),
-                port=self.config.get('Server', 'port', '7777')
+                language=self.language,
+                port=self.port
             )
             
-            if self.config.getboolean('Defaults', 'translate', False):
+            if self.translate:
                 cmd += ' -tr'
             
             self.log(f"[SERVER] Starting server with command: {cmd}")

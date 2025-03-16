@@ -43,8 +43,7 @@ brew install portaudio
 #### Linux
 ```bash
 # Audio dependencies
-sudo apt install portaudio19-dev libasound2-dev
-
+sudo apt install portaudio19-dev libasound2-dev libportaudiocpp0 libcairo2-dev libgirepository-1.0-dev libappindicator3-dev python3-tk xdotool xclip libxdo3 libxkbcommon-dev blt tk8.6-blt2.5
 # Development tools
 sudo apt install python3-dev python3-setuptools
 ```

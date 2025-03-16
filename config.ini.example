@@ -2,11 +2,18 @@
 host = localhost
 port = 7777
 url = http://%(host)s:%(port)s/inference
+# Command to start the whisper.cpp server
+# Available placeholders: {model_path}, {language}, {port}
+command = whisper-server -m {model_path} -l {language} --port {port} 
 
 [Models]
 # Directory containing the whisper.cpp model files (.bin)
-models_dir = ${WHISPER_MODELS_DIR}
+models_dir = ${HOME}/.local/share/whisper-models
 default_model = ggml-tiny.en.bin
+
+[Paths]
+# Virtual environment path
+venv_path = ${HOME}/.venvs/whispertype
 
 [Recording]
 # Minimum recording duration in seconds
@@ -20,14 +27,10 @@ auto_copy = false
 auto_type = false
 show_audio_meter = false
 translate = false
+verbose = false
 
 [UI]
 # Icon theme - light or dark
 theme = light
 # Notification sound when recording starts/stops
 enable_sounds = true
-
-[Server Command]
-# Command to start the whisper.cpp server
-# Available placeholders: {model_path}, {language}, {port}
-command = whisper-server -m {model_path} -l {language} --port {port} 
