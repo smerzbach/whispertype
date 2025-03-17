@@ -72,9 +72,16 @@ class WhisperType:
         print("[INIT] Starting WhisperType initialization...")
         self.config = WhisperTypeConfig()
         self.verbose = self.config.getboolean('Defaults', 'verbose', fallback=False)
+        
+        # Initialize state variables
         self.recording = False
-        self.menu_recording = False  # Add this flag to track menu-triggered recording
+        self.menu_recording = False
+        self.running = True
+        self.ctrl_pressed = False
+        self.shift_pressed = False
         self.audio_data = []
+        
+        # Load settings from config
         self.sample_rate = self.config.getint('Recording', 'sample_rate', 16000)
         self.temp_dir = tempfile.gettempdir()
         self.log(f"[INIT] Using temp directory: {self.temp_dir}")
@@ -108,23 +115,12 @@ class WhisperType:
             
         default_model = self.config.get('Models', 'default_model', fallback='ggml-tiny.en.bin')
         self.model_path = os.path.join(self.models_dir, default_model)
-        self.language = CONFIG.get('Defaults', 'language', fallback='en')
-        self.port = CONFIG.get('Server', 'port', fallback='7777')
-        self.translate = CONFIG.getboolean('Defaults', 'translate', fallback=False)
-        
-        # Enable AutoType by default
-        global AUTO_TYPE
-        AUTO_TYPE = True
+        self.language = self.config.get('Defaults', 'language', fallback='en')
+        self.port = self.config.get('Server', 'port', fallback='7777')
+        self.translate = self.config.getboolean('Defaults', 'translate', fallback=False)
         
         # Initialize server URL
         self.server_url = f"http://localhost:{self.port}/inference"
-        
-        # Initialize recording state
-        self.is_recording = False
-        self.audio_data = []
-        self.stream = None
-        self.progress_thread = None
-        self.stop_progress = False
         
         # Platform-specific setup
         self.log("[INIT] Setting up platform-specific configurations...")
@@ -136,7 +132,11 @@ class WhisperType:
         
         # Start keyboard listener
         self.log("[INIT] Setting up keyboard listeners...")
-        self.setup_keyboard_listener()
+        try:
+            self.setup_keyboard_listener()
+        except Exception as e:
+            self.log(f"[INIT] Error setting up keyboard listener: {e}")
+            sys.exit(1)
         
         # Auto-start server
         self.log("[INIT] Auto-starting server...")
@@ -151,6 +151,16 @@ class WhisperType:
 
     def setup_keyboard_listener(self):
         """Setup keyboard event handling"""
+        def parse_shortcut(shortcut_str):
+            """Parse shortcut string into modifier keys and main key"""
+            parts = shortcut_str.lower().split('+')
+            return {'ctrl': 'ctrl' in parts, 'shift': 'shift' in parts, 'key': parts[-1]}
+            
+        # Load shortcuts from config
+        record_shortcut = parse_shortcut(self.config.get('Shortcuts', 'record', fallback='ctrl+shift+z'))
+        quit_shortcut = parse_shortcut(self.config.get('Shortcuts', 'quit', fallback='ctrl+shift+x'))
+        toggle_type_shortcut = parse_shortcut(self.config.get('Shortcuts', 'toggle_type', fallback='ctrl+shift+t'))
+        
         def on_press(key):
             try:
                 self.log(f"[KEYBOARD] Key pressed: {key}")
@@ -161,15 +171,26 @@ class WhisperType:
                     self.log("[KEYBOARD] Shift key pressed")
                     self.shift_pressed = True
                 elif hasattr(key, 'char'):
-                    if key.char and key.char.upper() == 'Z' and self.ctrl_pressed and self.shift_pressed:
-                        self.log("[KEYBOARD] Ctrl+Shift+Z detected, toggling recording")
-                        self.start_recording()
-                    elif key.char and key.char.upper() == 'X' and self.ctrl_pressed and self.shift_pressed:
-                        self.log("[KEYBOARD] Ctrl+Shift+X detected, quitting application")
-                        self.quit()
-                    elif key.char and key.char.upper() == 'T' and self.ctrl_pressed and self.shift_pressed:
-                        self.log("[KEYBOARD] Ctrl+Shift+T detected, toggling auto-type")
-                        self.toggle_auto_type()
+                    key_char = key.char.lower() if key.char else None
+                    if key_char:
+                        # Check record shortcut
+                        if (record_shortcut['ctrl'] == self.ctrl_pressed and 
+                            record_shortcut['shift'] == self.shift_pressed and 
+                            key_char == record_shortcut['key']):
+                            self.log("[KEYBOARD] Record shortcut detected, starting recording")
+                            self.start_recording()
+                        # Check quit shortcut
+                        elif (quit_shortcut['ctrl'] == self.ctrl_pressed and 
+                              quit_shortcut['shift'] == self.shift_pressed and 
+                              key_char == quit_shortcut['key']):
+                            self.log("[KEYBOARD] Quit shortcut detected, quitting application")
+                            self.quit()
+                        # Check toggle type shortcut
+                        elif (toggle_type_shortcut['ctrl'] == self.ctrl_pressed and 
+                              toggle_type_shortcut['shift'] == self.shift_pressed and 
+                              key_char == toggle_type_shortcut['key']):
+                            self.log("[KEYBOARD] Toggle type shortcut detected, toggling auto-type")
+                            self.toggle_auto_type()
             except AttributeError as e:
                 self.log(f"[KEYBOARD] AttributeError in on_press: {e}")
 
@@ -186,10 +207,10 @@ class WhisperType:
                 # Stop recording if either Ctrl or Shift is released
                 if (key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r, keyboard.Key.shift_l, keyboard.Key.shift_r) 
                     and not (self.ctrl_pressed and self.shift_pressed)
-                    and not self.menu_recording):  # Only stop if not menu-triggered recording
-                    if self.recording:
-                        print("[KEYBOARD] Hotkey released, stopping recording")
-                        self.stop_recording()
+                    and not self.menu_recording  # Only stop if not menu-triggered recording
+                    and self.recording):
+                    self.log("[KEYBOARD] Hotkey released, stopping recording")
+                    self.stop_recording()
             except AttributeError as e:
                 self.log(f"[KEYBOARD] AttributeError in on_release: {e}")
 
@@ -294,8 +315,11 @@ class WhisperType:
                     radio=True
                 )
 
+            # Get common languages and ports from config
+            common_languages = self.config.get('Defaults', 'common_languages', fallback='en').split(',')
+            common_ports = self.config.get('Defaults', 'common_ports', fallback='7777').split(',')
+
             # Create language submenu
-            common_languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'zh', 'ja', 'ko']
             def create_language_item(lang_code):
                 return pystray.MenuItem(
                     lang_code,
@@ -305,7 +329,6 @@ class WhisperType:
                 )
 
             # Create port submenu
-            common_ports = ['7777', '7778', '7779', '7780']
             def create_port_item(port):
                 return pystray.MenuItem(
                     port,
@@ -669,10 +692,11 @@ class WhisperType:
         try:
             with open(audio_file, 'rb') as f:
                 files = {'file': f}
+                timeout = self.config.getint('Server', 'request_timeout', fallback=10)
                 response = requests.post(
                     self.server_url,
                     files=files,
-                    timeout=10
+                    timeout=timeout
                 )
                 
             if response.status_code == 200:
@@ -706,8 +730,9 @@ class WhisperType:
             if AUTO_TYPE:
                 self.log("[TEXT-HANDLER] Auto-Type enabled, preparing to type text...")
                 try:
-                    self.log("[TEXT-HANDLER] Adding delay before typing...")
-                    time.sleep(0.5)
+                    typing_delay = self.config.getfloat('UI', 'typing_delay', fallback=0.5)
+                    self.log(f"[TEXT-HANDLER] Adding delay of {typing_delay}s before typing...")
+                    time.sleep(typing_delay)
                     self.log("[TEXT-HANDLER] Starting to type text...")
                     pyautogui.write(text)
                     self.log("[TEXT-HANDLER] Text typed successfully")
