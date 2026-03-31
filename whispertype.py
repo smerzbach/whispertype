@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+import io
 import time
 import wave
-import tempfile
 import threading
 import subprocess
 import numpy as np
@@ -138,8 +138,6 @@ class WhisperType:
         
         # Load settings from config
         self.sample_rate = self.config.getint('Recording', 'sample_rate', 16000)
-        self.temp_dir = tempfile.gettempdir()
-        self.log(f"[INIT] Using temp directory: {self.temp_dir}")
         
         # Server state
         self.server_running = False
@@ -172,8 +170,9 @@ class WhisperType:
         self.port = self.config.get('Server', 'port', fallback='7777')
         self.translate = self.config.getboolean('Defaults', 'translate', fallback=False)
         
-        # Initialize server URL
+        # Initialize server URL and persistent HTTP session
         self.server_url = f"http://localhost:{self.port}/inference"
+        self.session = requests.Session()
         
         # Platform-specific setup
         self.log("[INIT] Setting up platform-specific configurations...")
@@ -287,15 +286,11 @@ class WhisperType:
         
         if self.platform == 'windows':
             self.icon_path = os.path.join(script_dir, 'icons/mic-windows.ico')
-            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-windows.ico')
         elif self.platform == 'darwin':  # macOS
             self.icon_path = os.path.join(script_dir, 'icons/mic-macos.png')
-            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-macos.png')
         else:  # Linux
             self.icon_path = os.path.join(script_dir, 'icons/mic-linux.png')
-            self.recording_icon_path = os.path.join(script_dir, 'icons/mic-recording-linux.png')
         self.log(f"[PLATFORM] Using icon path: {self.icon_path}")
-        self.log(f"[PLATFORM] Using recording icon path: {self.recording_icon_path}")
 
     def create_default_icon(self):
         """Create a default icon if the icon file is not found"""
@@ -352,10 +347,21 @@ class WhisperType:
         self.log("[ICON] Default icon created successfully")
         return image
 
+    def create_recording_icon(self):
+        """Create a solid red circle icon shown while recording"""
+        size = 256
+        image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        margin = size // 8
+        draw.ellipse([margin, margin, size - margin, size - margin], fill=(220, 30, 30, 255))
+        return image
+
     def create_tray_icon(self):
         """Create the system tray icon and menu"""
         self.log("[TRAY] Starting tray icon creation...")
         image = Image.open(self.icon_path) if os.path.exists(self.icon_path) else self.create_default_icon()
+        self._normal_icon = image
+        self._recording_icon = self.create_recording_icon()
         self.log(f"[TRAY] Icon loaded: {self.icon_path if os.path.exists(self.icon_path) else 'default icon'}")
         
         def fmt_shortcut(key):
@@ -681,6 +687,7 @@ class WhisperType:
             self.stop_recording()
         if self.server_running:
             self.stop_server()
+        self.session.close()
         self.tray_icon.stop()
         self.log("[APP] Shutdown complete")
 
@@ -692,38 +699,32 @@ class WhisperType:
             self.recording_start_time = time.time()
             self.log("\nRecording started... Hold Ctrl+Shift+Z to continue recording.")
             threading.Thread(target=self.record_audio).start()
-            
-            # Update tray icon
-            if os.path.exists(self.recording_icon_path):
-                self.tray_icon.icon = Image.open(self.recording_icon_path)
+            self.tray_icon.icon = self._recording_icon
 
     def stop_recording(self):
         """Stop recording and process audio"""
         if self.recording:
             self.recording = False
             recording_duration = time.time() - self.recording_start_time
-            
-            # Restore normal icon
-            if os.path.exists(self.icon_path):
-                self.tray_icon.icon = Image.open(self.icon_path)
-            
+
+            self.tray_icon.icon = self._normal_icon
+
             if recording_duration < self.config.getfloat('Recording', 'min_duration', 0.1):
                 self.log(f"Recording too short ({recording_duration:.1f}s), discarding...")
                 self.audio_data = []
                 return
-                
+
             self.log("Recording stopped, processing...")
-            
-            audio_file = self.save_audio()
-            if audio_file:
+
+            wav_buf = self._audio_to_wav_bytes()
+            if wav_buf:
                 self.log("Sending to whisper.cpp server...")
-                transcribed_text = self.transcribe_audio(audio_file)
+                transcribed_text = self.transcribe_audio(wav_buf)
                 if transcribed_text:
                     self.log(f"Transcribed: {transcribed_text}")
                     self.handle_transcribed_text(transcribed_text)
                 else:
                     self.log("No transcription received")
-                os.remove(audio_file)
 
     def record_audio(self):
         """Record audio in a separate thread"""
@@ -741,38 +742,33 @@ class WhisperType:
             self.log(f"Error recording audio: {e}")
             self.recording = False
 
-    def save_audio(self):
-        """Save recorded audio to a temporary file"""
+    def _audio_to_wav_bytes(self):
+        """Encode recorded audio as WAV into an in-memory buffer"""
         if not self.audio_data:
             return None
-            
         try:
             audio_data = np.concatenate(self.audio_data)
-            temp_file = os.path.join(self.temp_dir, 'whispertype_recording.wav')
-            
-            with wave.open(temp_file, 'wb') as wf:
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(self.sample_rate)
                 wf.writeframes((audio_data * 32767).astype(np.int16).tobytes())
-            
-            return temp_file
+            buf.seek(0)
+            return buf
         except Exception as e:
-            self.log(f"Error saving audio: {e}")
+            self.log(f"Error building audio buffer: {e}")
             return None
 
-    def transcribe_audio(self, audio_file):
-        """Send audio file to whisper.cpp server for transcription"""
+    def transcribe_audio(self, wav_buf):
+        """Send in-memory WAV buffer to whisper.cpp server for transcription"""
         try:
-            with open(audio_file, 'rb') as f:
-                files = {'file': f}
-                timeout = self.config.getint('Server', 'request_timeout', fallback=10)
-                response = requests.post(
-                    self.server_url,
-                    files=files,
-                    timeout=timeout
-                )
-                
+            timeout = self.config.getint('Server', 'request_timeout', fallback=10)
+            response = self.session.post(
+                self.server_url,
+                files={'file': ('audio.wav', wav_buf, 'audio/wav')},
+                timeout=timeout,
+            )
             if response.status_code == 200:
                 result = response.json()
                 text = result.get('text', '').strip()
