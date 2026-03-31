@@ -18,21 +18,13 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 :: Resolve venv path
 :: -----------------------------------------------------------------------
 if defined WHISPERTYPE_VENV (
-    set "VENV_PATH=%WHISPERTYPE_VENV%"
+    set "VENV_PATH=!WHISPERTYPE_VENV!"
     goto :venv_resolved
 )
 
-:: Use Python to read and fully expand venv_path from the ini file.
+:: Use Python helper to read and fully expand venv_path from the ini file.
 :: This handles ${HOME}/..., %USERPROFILE%/..., and any other env syntax.
-for /f "delims=" %%P in ('python -c ^
-    "import configparser,os,sys; ^
-     os.environ.setdefault(\"HOME\", os.path.expanduser(\"~\")); ^
-     ini=next((p for p in [\"config.ini\",\"config.ini.example\"] if os.path.isfile(p)), None); ^
-     sys.exit(1) if not ini else None; ^
-     c=configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation()); ^
-     c.read(ini); ^
-     v=c.get(\"Paths\",\"venv_path\",fallback=\"\"); ^
-     print(os.path.normpath(os.path.expandvars(os.path.expanduser(v))) if v else \"\", end=\"\")"') do (
+for /f "delims=" %%P in ('python "%SCRIPT_DIR%\get_venv_path.py"') do (
     set "VENV_PATH=%%P"
 )
 
