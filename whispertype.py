@@ -171,7 +171,13 @@ class WhisperType:
                     self.log("[KEYBOARD] Shift key pressed")
                     self.shift_pressed = True
                 elif hasattr(key, 'char'):
-                    key_char = key.char.lower() if key.char else None
+                    # On Windows, Ctrl held down makes key.char a control character
+                    # (e.g. Ctrl+A → '\x01'). Fall back to vk (virtual key code) to
+                    # recover the plain letter (vk 65-90 → 'a'-'z').
+                    raw = key.char
+                    if raw and ord(raw) < 32 and hasattr(key, 'vk') and key.vk is not None:
+                        raw = chr(key.vk).lower()
+                    key_char = raw.lower() if raw else None
                     if key_char:
                         # Check record shortcut
                         if (record_shortcut['ctrl'] == self.ctrl_pressed and 
