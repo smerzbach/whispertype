@@ -368,11 +368,21 @@ class WhisperType:
             # Create model submenu
             models = []
             if os.path.exists(self.models_dir):
-                models = sorted([f for f in os.listdir(self.models_dir) if f.endswith('.bin')])
+                models = sorted(
+                    [f for f in os.listdir(self.models_dir) if f.endswith('.bin')],
+                    key=lambda f: os.path.getsize(os.path.join(self.models_dir, f))
+                )
             
             def create_model_item(model_name):
+                model_file = os.path.join(self.models_dir, model_name)
+                size_bytes = os.path.getsize(model_file)
+                if size_bytes >= 1024 ** 3:
+                    size_str = f"{size_bytes / 1024**3:.1f} GB"
+                else:
+                    size_str = f"{size_bytes / 1024**2:.0f} MB"
+                label = f"{model_name} ({size_str})"
                 return pystray.MenuItem(
-                    model_name,
+                    label,
                     lambda item: self.change_model(model_name),
                     checked=lambda item: os.path.basename(self.model_path) == model_name,
                     radio=True
