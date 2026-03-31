@@ -6,4 +6,5 @@ pynput==1.7.6
 pystray>=0.19.5
 Pillow>=11.1.0
 pyautogui>=0.9.54
-PyGObject==3.50.0
+# Linux: install python3-gi via system package manager (apt/pacman/dnf)
+# Windows/macOS: not needed, pystray uses native backends via ctypes
