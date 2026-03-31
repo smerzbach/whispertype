@@ -20,6 +20,10 @@ import threading
 import zipfile
 from typing import Callable, Optional
 
+# Ensure $HOME is defined on Windows so os.path.expandvars("${HOME}/...")
+# works identically on all platforms.
+os.environ.setdefault("HOME", os.path.expanduser("~"))
+
 import requests
 
 # GGML model IDs (same set as upstream download-ggml-model.sh)

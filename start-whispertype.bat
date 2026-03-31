@@ -4,6 +4,9 @@
 ::   1. WHISPERTYPE_VENV env var (set by install.bat)
 ::   2. venv_path key in config.ini
 ::   3. venv_path key in config.ini.example
+::
+:: Path values in the ini file (e.g. ${HOME}/...) are resolved by Python so
+:: they expand correctly on all platforms.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
@@ -19,26 +22,23 @@ if defined WHISPERTYPE_VENV (
     goto :venv_resolved
 )
 
-set "INI_SOURCE="
-if exist "%SCRIPT_DIR%\config.ini" (
-    set "INI_SOURCE=%SCRIPT_DIR%\config.ini"
-) else if exist "%SCRIPT_DIR%\config.ini.example" (
-    set "INI_SOURCE=%SCRIPT_DIR%\config.ini.example"
-) else (
-    echo Error: config.ini.example not found and WHISPERTYPE_VENV is not set.
-    pause
-    exit /b 1
+:: Use Python to read and fully expand venv_path from the ini file.
+:: This handles ${HOME}/..., %USERPROFILE%/..., and any other env syntax.
+for /f "delims=" %%P in ('python -c ^
+    "import configparser,os,sys; ^
+     os.environ.setdefault(\"HOME\", os.path.expanduser(\"~\")); ^
+     ini=next((p for p in [\"config.ini\",\"config.ini.example\"] if os.path.isfile(p)), None); ^
+     sys.exit(1) if not ini else None; ^
+     c=configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation()); ^
+     c.read(ini); ^
+     v=c.get(\"Paths\",\"venv_path\",fallback=\"\"); ^
+     print(os.path.normpath(os.path.expandvars(os.path.expanduser(v))) if v else \"\", end=\"\")"') do (
+    set "VENV_PATH=%%P"
 )
-
-for /f "tokens=2 delims== " %%A in ('findstr /b "venv_path" "%INI_SOURCE%"') do (
-    set "VENV_PATH=%%A"
-)
-
-:: Expand %LOCALAPPDATA%, %USERPROFILE%, etc.
-call set "VENV_PATH=%VENV_PATH%"
 
 if not defined VENV_PATH (
-    echo Error: Could not read venv_path from %INI_SOURCE%.
+    echo Error: Could not read venv_path from config.ini or config.ini.example.
+    echo        Set WHISPERTYPE_VENV or add a venv_path entry to your config.
     pause
     exit /b 1
 )

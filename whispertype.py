@@ -7,6 +7,9 @@ import tempfile
 import threading
 import subprocess
 import numpy as np
+
+# Ensure $HOME is defined on Windows so config paths using ${HOME}/... expand correctly.
+os.environ.setdefault("HOME", os.path.expanduser("~"))
 import sounddevice as sd
 import requests
 import pyperclip
