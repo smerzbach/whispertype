@@ -13,6 +13,8 @@ models_dir = ${HOME}/.local/share/whisper.cpp/models
 default_model = ggml-tiny.en.bin
 
 [Paths]
+# Optional: install root (written by installer.py); models often live in <this>/models
+whisper_install_dir = ${HOME}/.local/share/whisper.cpp
 # Virtual environment path
 venv_path = ${HOME}/.venvs/whispertype
 

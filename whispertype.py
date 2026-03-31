@@ -18,6 +18,8 @@ import pystray
 import pyautogui
 from pynput import keyboard
 import platform
+import shlex
+
 
 def load_config():
     """Load configuration from config.ini file"""
@@ -25,14 +27,10 @@ def load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
     example_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini.example')
     
-    # If config.ini doesn't exist, create it from example
+    # ensure config.ini exists
     if not os.path.exists(config_path):
-        if os.path.exists(example_config_path):
-            shutil.copy2(example_config_path, config_path)
-            print(f"Created config.ini from example file")
-        else:
-            print(f"Warning: Neither config.ini nor config.ini.example found")
-            return None
+        print(f"Warning: No config.ini found")
+        return None
     
     try:
         config.read(config_path)
@@ -41,22 +39,76 @@ def load_config():
         print(f"Error reading config file: {e}")
         return None
 
-# Load configuration
-CONFIG = load_config()
 
-# Global settings from config
-MIN_RECORDING_DURATION = float(CONFIG.get('Recording', 'min_duration', fallback='0.1'))  # seconds
-REQUEST_TIMEOUT = 10  # seconds
-SHOW_AUDIO_METER = CONFIG.getboolean('Defaults', 'show_audio_meter', fallback=False)
-AUTO_COPY = CONFIG.getboolean('Defaults', 'auto_copy', fallback=False)
-AUTO_TYPE = CONFIG.getboolean('Defaults', 'auto_type', fallback=False)
+CONFIG = None
+MIN_RECORDING_DURATION = 0.1
+REQUEST_TIMEOUT = 10
+SHOW_AUDIO_METER = False
+AUTO_COPY = False
+AUTO_TYPE = False
+
+
+def config_file_paths():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return (
+        os.path.join(script_dir, "config.ini"),
+        os.path.join(script_dir, "config.ini.example"),
+    )
+
+
+def ensure_config_file():
+    """Load config.ini if it exists, else seed from example (no file copy).
+
+    Returns a ConfigParser if successful, None if neither file is found.
+    config.ini is NOT created here; the installer writes it on Save.
+    """
+    global CONFIG
+    config_path, example_path = config_file_paths()
+    cfg = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    try:
+        if os.path.exists(config_path):
+            cfg.read(config_path)
+        elif os.path.exists(example_path):
+            cfg.read(example_path)
+        else:
+            print("Error: Neither config.ini nor config.ini.example found")
+            return None
+        CONFIG = cfg
+        return cfg
+    except configparser.Error as e:
+        print(f"Error reading config file: {e}")
+        return None
+
+
+def reload_config_from_disk():
+    global CONFIG
+    config_path, _ = config_file_paths()
+    cfg = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    cfg.read(config_path)
+    CONFIG = cfg
+    sync_globals_from_config()
+    return cfg
+
+
+def sync_globals_from_config():
+    global MIN_RECORDING_DURATION, SHOW_AUDIO_METER, AUTO_COPY, AUTO_TYPE
+    if CONFIG is None:
+        MIN_RECORDING_DURATION = 0.1
+        SHOW_AUDIO_METER = False
+        AUTO_COPY = False
+        AUTO_TYPE = False
+        return
+    MIN_RECORDING_DURATION = float(CONFIG.get('Recording', 'min_duration', fallback='0.1'))
+    SHOW_AUDIO_METER = CONFIG.getboolean('Defaults', 'show_audio_meter', fallback=False)
+    AUTO_COPY = CONFIG.getboolean('Defaults', 'auto_copy', fallback=False)
+    AUTO_TYPE = CONFIG.getboolean('Defaults', 'auto_type', fallback=False)
 
 class WhisperTypeConfig:
     def __init__(self):
         self.config = CONFIG
-        
-    def get(self, section, key, fallback=None):
-        return self.config.get(section, key, fallback=fallback)
+
+    def get(self, section, key, fallback=None, raw=False):
+        return self.config.get(section, key, fallback=fallback, raw=raw)
         
     def getboolean(self, section, key, fallback=False):
         return self.config.getboolean(section, key, fallback=fallback)
@@ -102,13 +154,11 @@ class WhisperType:
             }
         
         # Load configuration
-        self.models_dir = self.config.get('Models', 'models_dir')
+        raw_models = self.config.get("Models", "models_dir", raw=True)
+        self.models_dir = os.path.expanduser(os.path.expandvars(raw_models or ""))
         if not self.models_dir:
             print("Error: models_dir not set in config.ini")
             sys.exit(1)
-            
-        # Expand any environment variables in the path
-        self.models_dir = os.path.expandvars(self.models_dir)
         if not os.path.exists(self.models_dir):
             print(f"Error: Models directory not found: {self.models_dir}")
             sys.exit(1)
@@ -371,6 +421,11 @@ class WhisperType:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings", settings_menu),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "Setup whisper.cpp / models…",
+                    lambda item: self.run_installer_wizard(),
+                ),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem(f"Quit ({fmt_shortcut('quit')})", lambda item: self.quit())
             )
             self.log("[TRAY] Menu structure created successfully")
@@ -533,7 +588,7 @@ class WhisperType:
                 self.log(f"[SERVER] Model file not found: {model_path}")
                 return
             
-            cmd_template = self.config.get('Server', 'command')
+            cmd_template = self.config.get("Server", "command", raw=True)
             cmd = cmd_template.format(
                 model_path=model_path,
                 language=self.language,
@@ -544,7 +599,9 @@ class WhisperType:
                 cmd += ' -tr'
             
             self.log(f"[SERVER] Starting server with command: {cmd}")
-            self.server_process = subprocess.Popen(cmd.split())
+            posix = os.name != "nt"
+            args = shlex.split(cmd, posix=posix)
+            self.server_process = subprocess.Popen(args)
             self.server_running = True
             self.log("[SERVER] Server starting...")
             
@@ -756,11 +813,59 @@ class WhisperType:
             self.menu_recording = True
             self.start_recording()
 
+    def run_installer_wizard(self):
+        """Run setup in a subprocess (avoids mixing tray GUI with tkinter)."""
+        installer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "installer.py")
+        cfg_path, _ = config_file_paths()
+        try:
+            subprocess.run([sys.executable, installer, cfg_path], check=False)
+        except Exception as e:
+            self.log(f"[INSTALLER] Failed to launch: {e}")
+            return
+        reload_config_from_disk()
+        self.config = WhisperTypeConfig()
+        raw_m = self.config.get("Models", "models_dir", raw=True)
+        self.models_dir = os.path.expanduser(os.path.expandvars(raw_m or ""))
+        default_model = self.config.get(
+            "Models", "default_model", fallback="ggml-tiny.en.bin"
+        )
+        self.model_path = os.path.join(self.models_dir, default_model)
+        self.language = self.config.get("Defaults", "language", fallback="en")
+        self.port = self.config.get("Server", "port", fallback="7777")
+        self.server_url = f"http://localhost:{self.port}/inference"
+        self.translate = self.config.getboolean("Defaults", "translate", fallback=False)
+        if self.server_running:
+            self.stop_server()
+            self.start_server()
+        self.tray_icon.update_menu()
+        self.update_tray_status()
+
+
 def main():
     print("[MAIN] WhisperType starting...")
     print("[MAIN] Hold Ctrl+Shift+Z to record.")
     print("[MAIN] Press Ctrl+Shift+X to quit.")
-    
+
+    global CONFIG
+    from installer import environment_ok, run_setup_wizard
+
+    cfg = ensure_config_file()
+    if cfg is None:
+        sys.exit(1)
+    CONFIG = cfg
+    sync_globals_from_config()
+    cfg_path, _ = config_file_paths()
+    while not environment_ok(CONFIG):
+        print("[MAIN] whisper-server or models missing — opening setup wizard.")
+        if not run_setup_wizard(cfg_path, CONFIG, show_setup_gaps=True):
+            print("[MAIN] Setup cancelled.")
+            sys.exit(1)
+        CONFIG = configparser.ConfigParser(
+            interpolation=configparser.ExtendedInterpolation()
+        )
+        CONFIG.read(cfg_path)
+        sync_globals_from_config()
+
     try:
         print("[MAIN] Creating WhisperType instance...")
         client = WhisperType()

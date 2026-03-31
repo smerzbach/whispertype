@@ -1,57 +1,67 @@
-#!/bin/bash
-
-# Get the absolute path of the script directory
+#!/usr/bin/env bash
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Ensure config.ini exists
-if [ ! -f "$SCRIPT_DIR/config.ini" ]; then
-    if [ -f "$SCRIPT_DIR/config.ini.example" ]; then
-        cp "$SCRIPT_DIR/config.ini.example" "$SCRIPT_DIR/config.ini"
-        echo "Created config.ini from example file"
+# ---------------------------------------------------------------------------
+# Resolve venv path — priority order:
+#   1. WHISPERTYPE_VENV env var (set by install.sh)
+#   2. venv_path key in config.ini
+#   3. venv_path key in config.ini.example
+# ---------------------------------------------------------------------------
+if [ -n "${WHISPERTYPE_VENV:-}" ]; then
+    VENV_PATH="$WHISPERTYPE_VENV"
+else
+    if [ -f "$SCRIPT_DIR/config.ini" ]; then
+        INI_SOURCE="$SCRIPT_DIR/config.ini"
+    elif [ -f "$SCRIPT_DIR/config.ini.example" ]; then
+        INI_SOURCE="$SCRIPT_DIR/config.ini.example"
     else
-        echo "Error: config.ini.example not found"
-        read -p "Press Enter to exit"
+        echo "Error: config.ini.example not found and WHISPERTYPE_VENV is not set."
+        read -rp "Press Enter to exit" _
+        exit 1
+    fi
+    VENV_PATH="$(grep "^venv_path" "$INI_SOURCE" | cut -d= -f2 | tr -d ' ' | envsubst)"
+    if [ -z "$VENV_PATH" ]; then
+        echo "Error: Could not read venv_path from $INI_SOURCE and WHISPERTYPE_VENV is not set."
+        read -rp "Press Enter to exit" _
         exit 1
     fi
 fi
 
-# Read venv path from ini file and expand environment variables
-WHISPER_VENV_PATH=$(grep "^venv_path" "$SCRIPT_DIR/config.ini" | cut -d= -f2 | tr -d ' ' | envsubst)
+# Expand ~ / env vars that weren't caught by envsubst (e.g. literal $HOME)
+VENV_PATH="$(eval echo "$VENV_PATH")"
 
-# Verify we got a value
-if [ -z "$WHISPER_VENV_PATH" ]; then
-    echo "Error: Could not read venv_path from config.ini"
-    read -p "Press Enter to exit"
-    exit 1
-fi
+# ---------------------------------------------------------------------------
+# Create venv + install deps if it doesn't exist yet
+# (covers the case where start-whispertype.sh is called directly without
+#  running install.sh first)
+# ---------------------------------------------------------------------------
+if [ ! -d "$VENV_PATH" ]; then
+    echo "Creating virtual environment at $VENV_PATH ..."
+    python3 -m venv "$VENV_PATH"
+    # shellcheck disable=SC1091
+    source "$VENV_PATH/bin/activate"
 
-# Path to the whisper client script
-CLIENT_PATH="${SCRIPT_DIR}/whispertype.py"
-
-# Create virtual environment if it doesn't exist
-if [ ! -d "$WHISPER_VENV_PATH" ]; then
-    echo "Creating virtual environment at $WHISPER_VENV_PATH"
-    python3 -m venv "$WHISPER_VENV_PATH"
-    source "$WHISPER_VENV_PATH/bin/activate"
-    
-    # Install system dependencies if needed
-    if ! dpkg -l | grep -q "python3-gi"; then
-        echo "Installing required system packages..."
+    if command -v dpkg &>/dev/null && ! dpkg -l python3-gi &>/dev/null 2>&1; then
+        echo "Installing required system packages (python3-gi)..."
         sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0
     fi
-    
+
     pip install -r "${SCRIPT_DIR}/requirements.txt"
 else
-    # Activate virtual environment
-    source "$WHISPER_VENV_PATH/bin/activate"
+    # shellcheck disable=SC1091
+    source "$VENV_PATH/bin/activate"
 fi
 
-# Run the client
+# ---------------------------------------------------------------------------
+# Launch WhisperType
+# ---------------------------------------------------------------------------
+CLIENT_PATH="${SCRIPT_DIR}/whispertype.py"
+
 if [ -f "${SCRIPT_DIR}/clean_python.sh" ]; then
     "${SCRIPT_DIR}/clean_python.sh" python3 "$CLIENT_PATH"
 else
     python3 "$CLIENT_PATH"
-fi 
+fi
 
-
-read -p "Press Enter to quit"
+read -rp "Press Enter to quit" _
