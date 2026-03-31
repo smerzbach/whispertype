@@ -11,7 +11,7 @@ ini = next(
 if not ini:
     sys.exit(1)
 
-c = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+c = configparser.RawConfigParser()
 c.read(ini)
 v = c.get("Paths", "venv_path", fallback="")
 if not v:
