@@ -299,6 +299,10 @@ class WhisperType:
         image = Image.open(self.icon_path) if os.path.exists(self.icon_path) else self.create_default_icon()
         self.log(f"[TRAY] Icon loaded: {self.icon_path if os.path.exists(self.icon_path) else 'default icon'}")
         
+        def fmt_shortcut(key):
+            raw = self.config.get('Shortcuts', key, fallback='')
+            return '+'.join(p.capitalize() for p in raw.split('+')) if raw else ''
+
         def create_menu():
             self.log("[TRAY] Creating menu structure...")
             
@@ -351,17 +355,17 @@ class WhisperType:
             )
             
             menu = (
-                pystray.MenuItem("Auto-Type Text (Ctrl+Shift+T)", lambda item: self.toggle_auto_type(), checked=lambda item: AUTO_TYPE),
+                pystray.MenuItem(f"Auto-Type Text ({fmt_shortcut('toggle_type')})", lambda item: self.toggle_auto_type(), checked=lambda item: AUTO_TYPE),
                 pystray.MenuItem("Auto-Copy to Clipboard", lambda item: self.toggle_auto_copy(), checked=lambda item: AUTO_COPY),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Record (Ctrl+Shift+Z)", lambda item: self.toggle_recording(), checked=lambda item: self.recording),
+                pystray.MenuItem(f"Record ({fmt_shortcut('record')})", lambda item: self.toggle_recording(), checked=lambda item: self.recording),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Start Server", lambda item: self.start_server(), enabled=lambda item: not self.server_running),
                 pystray.MenuItem("Stop Server", lambda item: self.stop_server(), enabled=lambda item: self.server_running),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings", settings_menu),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Quit (Ctrl+Shift+X)", lambda item: self.quit())
+                pystray.MenuItem(f"Quit ({fmt_shortcut('quit')})", lambda item: self.quit())
             )
             self.log("[TRAY] Menu structure created successfully")
             return menu
@@ -590,14 +594,8 @@ class WhisperType:
         self.log("[AUTO-TYPE] Toggling auto-type...")
         AUTO_TYPE = not AUTO_TYPE
         self.log(f"[AUTO-TYPE] Auto-Type is now {'enabled' if AUTO_TYPE else 'disabled'}")
-        # Update menu item state if menu is available
-        if hasattr(self.tray_icon, 'menu'):
-            self.log("[AUTO-TYPE] Updating menu item state...")
-            for item in self.tray_icon.menu:
-                if isinstance(item, pystray.MenuItem) and item.text == "Auto-Type Text":
-                    item._checked = AUTO_TYPE
-                    self.log("[AUTO-TYPE] Menu item state updated")
-                    break
+        self.tray_icon.update_menu()
+        self.update_tray_status()
 
     def quit(self):
         """Quit the application"""
