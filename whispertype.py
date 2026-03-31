@@ -530,7 +530,7 @@ class WhisperType:
             model_path = self.model_path
             
             if not os.path.exists(model_path):
-                self.log("[SERVER] Model file not found:", model_path)
+                self.log(f"[SERVER] Model file not found: {model_path}")
                 return
             
             cmd_template = self.config.get('Server', 'command')
